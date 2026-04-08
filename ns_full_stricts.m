@@ -212,17 +212,20 @@ for iN = 1:length(Nvec)
         for iy = 1:ny
             for ix = 1:nx
                 idx = idx + 1;
-                % Approximate Laplacian eigenvalue for mode (kx(ix), iy, iz):
-                %   x-direction: Fourier wavenumber squared
-                %   y,z-direction: Dirichlet mode approximation pi^2*m^2/L^2
-                K_diag(idx) = -(kx(ix)^2 + (pi/W)^2 * iy^2 + (pi/Z)^2 * iz^2);
+                % Store eigenvalue of the negative Laplacian (-Delta) for mode
+                % (kx(ix), iy, iz).  The negative sign gives a positive-definite
+                % operator so that K = Mass * diag(K_diag) represents -<v, Delta u>
+                % (stiffness), and Ka = Mass + tau*nu*K is SPD.
+                %   x-direction: Fourier eigenvalue = kx^2
+                %   y,z-direction: Dirichlet sine mode approximation pi^2*m^2/L^2
+                K_diag(idx) = kx(ix)^2 + (pi/W)^2 * iy^2 + (pi/Z)^2 * iz^2;
             end
         end
     end
-    K = spdiags(K_diag .* mass_diag, 0, dof, dof);  % weak-form stiffness
+    K = spdiags(K_diag .* mass_diag, 0, dof, dof);  % weak-form stiffness: M*(-Delta)
 
     % ---- Time-stepping matrix ----
-    Ka = Mass + tau * nu * (-K);  % (M - tau*nu*K) in weak form
+    Ka = Mass + tau * nu * K;  % M + tau*nu*(-Delta) in weak form (implicit diffusion)
 
     % ---- PCG pressure operator setup ----
     % tolP / maxitP for all phi solves
@@ -267,6 +270,7 @@ for iN = 1:length(Nvec)
     [phi0, flag0, relres0, iter0] = pcg(applyS, rhs_phi0, tolP, maxitP);
     phi0(i0) = 0;
     if flag0 ~= 0
+        % Execution continues with the best iterate found; accuracy may be reduced.
         warning('PCG for initial phi did not converge: flag=%d, relres=%g, iter=%d', ...
             flag0, relres0, iter0);
     end
@@ -658,6 +662,11 @@ end
 %     fx,fy,fz: partial derivatives on (nx,ny,nz) grid
 %
 %   Layout of c: c(ix + (iy-1)*nx + (iz-1)*nx*ny) for ix=1..nx, iy=1..ny, iz=1..nz
+%
+%   Parameters My, Mz, i0, idxNZ are accepted but not used in this simplified
+%   implementation; they are part of the interface to maintain compatibility
+%   with the full curvilinear code that uses them for combined basis indexing
+%   and zero-mode treatment.
 %--------------------------------------------------------------------------
 function [f, fx, fy, fz] = reconstruct_scalar_and_derivatives_from_coeff( ...
     c, Em, dEm, Pm2, dPm2, PmZ_NZ, dPmZ_NZ, PmZ0, dPmZ0, ...
@@ -704,6 +713,9 @@ function [f, fx, fy, fz] = reconstruct_scalar_and_derivatives_from_coeff( ...
                 % lepolym returns derivatives w.r.t. the reference coordinate
                 % y_ref in [-1,1].  The physical mapping is y_phys = (y_ref+1)*W/2,
                 % so d/dy_phys = (2/W) * d/dy_ref.
+                % The bounds check guards against mode index exceeding the polynomial
+                % matrix rows, which can happen in the full code when the combined
+                % Dirichlet basis has fewer modes than the raw Legendre basis.
                 if my <= size(Pm2,1)
                     ey_vals  = Pm2(my, :)';    % values at reference Gauss points
                     dey_vals = dPm2(my, :)' * (2/W);  % d/dy_phys via chain rule
@@ -712,6 +724,7 @@ function [f, fx, fy, fz] = reconstruct_scalar_and_derivatives_from_coeff( ...
                     dey_vals = zeros(ny,1);
                 end
                 % Similarly for z: z_phys = (z_ref+1)*Z/2 => d/dz_phys = (2/Z)*d/dz_ref.
+                % Bounds check for the same reason as the y-direction above.
                 if mz <= size(PmZ_NZ,1)
                     ez_vals  = PmZ_NZ(mz, :)';
                     dez_vals = dPmZ_NZ(mz, :)' * (2/Z);  % d/dz_phys via chain rule
@@ -741,6 +754,10 @@ end
 %   (for the Fourier x Legendre x Legendre basis with Gauss quadrature)
 %
 %   Returns column vector c of length dof = nx*ny*nz.
+%
+%   Parameters wPmZ_0, My, Mz, i0 are accepted but not used in this simplified
+%   implementation; they are part of the interface for the full curvilinear
+%   code that applies separate weights for the zero z-mode (NZ=0 component).
 %--------------------------------------------------------------------------
 function c = project_to_coeff_split(f, wEm1, wPm2, wPmZ_NZ, wPmZ_0, ...
     nx, ny, nz, My, Mz, i0)  %#ok<INUSD>
